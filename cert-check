@@ -1,0 +1,138 @@
+#!/bin/bash
+# cert-check — Check TLS certificate expiration for homelab services
+# Deployed on CT 192 (OpenFang) at /usr/local/bin/cert-check
+# Compatible with OpenFang shell_exec constraints (no pipes in invocation)
+
+set -euo pipefail
+
+WARN_DAYS="${CERT_WARN_DAYS:-14}"
+TRAEFIK_IP="192.168.1.110"
+
+# Services with HTTPS via Traefik (SNI on .110:443)
+declare -A SERVICES=(
+  [traefik]="traefik.pixelium.internal"
+  [authentik]="authentik.pixelium.internal"
+  [forgejo]="forgejo.pixelium.internal"
+  [homepage]="homepage.pixelium.internal"
+  [vaultwarden]="vaultwarden.pixelium.internal"
+  [jellyfin]="jellyfin.pixelium.internal"
+  [immich]="immich.pixelium.internal"
+  [kavita]="kavita.pixelium.internal"
+  [freshrss]="freshrss.pixelium.internal"
+  [the-lounge]="the-lounge.pixelium.internal"
+  [linkwarden]="linkwarden.pixelium.internal"
+  [bytestash]="bytestash.pixelium.internal"
+  [drawio]="drawio.pixelium.internal"
+  [excalidraw]="excalidraw.pixelium.internal"
+  [semaphore]="semaphore.pixelium.internal"
+  [netbox]="netbox.pixelium.internal"
+  [beszel]="beszel.pixelium.internal"
+  [wazuh]="wazuh.pixelium.internal"
+  [victoriametrics]="victoriametrics.pixelium.internal"
+  [patchmon]="patchmon.pixelium.internal"
+  [openfang]="openfang.pixelium.internal"
+  [technitium]="technitium.pixelium.internal"
+)
+
+check_cert() {
+  local name="$1"
+  local host="$2"
+  local enddate
+  local days_left
+
+  enddate=$(echo | openssl s_client -connect "${TRAEFIK_IP}:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2) || true
+
+  if [ -z "$enddate" ]; then
+    echo "FAIL $name — cannot read certificate"
+    return 1
+  fi
+
+  local exp_epoch
+  exp_epoch=$(date -d "$enddate" +%s 2>/dev/null) || true
+  local now_epoch
+  now_epoch=$(date +%s)
+
+  if [ -z "$exp_epoch" ]; then
+    echo "FAIL $name — cannot parse date: $enddate"
+    return 1
+  fi
+
+  days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+
+  if [ "$days_left" -lt 0 ]; then
+    echo "EXPIRED $name — expired $(( -days_left ))d ago ($enddate)"
+    return 2
+  elif [ "$days_left" -lt "$WARN_DAYS" ]; then
+    echo "WARNING $name — expires in ${days_left}d ($enddate)"
+    return 1
+  else
+    echo "OK $name — ${days_left}d remaining ($enddate)"
+    return 0
+  fi
+}
+
+usage() {
+  echo "Usage: cert-check [all|<service>...] [--warn N]"
+  echo ""
+  echo "Services: ${!SERVICES[*]}"
+  echo ""
+  echo "Examples:"
+  echo "  cert-check all"
+  echo "  cert-check all --warn 30"
+  echo "  cert-check traefik forgejo"
+  exit 0
+}
+
+# Parse args
+targets=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --warn) WARN_DAYS="${2:-14}"; shift 2 ;;
+    --help|-h) usage ;;
+    all) targets=("${!SERVICES[@]}"); shift ;;
+    *) targets+=("$1"); shift ;;
+  esac
+done
+
+if [ ${#targets[@]} -eq 0 ]; then
+  usage
+fi
+
+# Check certificates
+ok=0
+warn=0
+fail=0
+results=""
+
+for name in "${targets[@]}"; do
+  host="${SERVICES[$name]:-}"
+  if [ -z "$host" ]; then
+    echo "UNKNOWN service: $name"
+    fail=$((fail + 1))
+    continue
+  fi
+
+  result=$(check_cert "$name" "$host")
+  rc=$?
+  results+="$result"$'\n'
+
+  case $rc in
+    0) ok=$((ok + 1)) ;;
+    1) warn=$((warn + 1)) ;;
+    2) fail=$((fail + 1)) ;;
+  esac
+done
+
+# Output
+echo "$results"
+total=$((ok + warn + fail))
+echo "---"
+echo "TOTAL: ${total} checked — ${ok} OK, ${warn} WARNING, ${fail} CRITICAL"
+
+if [ "$fail" -gt 0 ]; then
+  exit 2
+elif [ "$warn" -gt 0 ]; then
+  exit 1
+else
+  exit 0
+fi
