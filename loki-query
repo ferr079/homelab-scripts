@@ -1,0 +1,179 @@
+#!/bin/bash
+# loki-query — Interroge Loki pour les services homelab
+# Conçu pour être appelé par OpenFang shell_exec (pas de pipes/accolades exposées)
+set -euo pipefail
+
+LOKI="http://192.168.1.240:3100"
+LIMIT=200
+DEFAULT_RANGE="1h"
+
+usage() {
+    cat <<'EOF'
+Usage: loki-query <service> [timerange] [filter]
+       loki-query labels
+       loki-query services
+
+Services:  headscale, traefik, dns, dns2, step-ca, forgejo, homepage, ...
+Filters:   service-specific ou texte libre
+Timerange: 15m, 1h, 6h, 1d, 7d (default: 1h)
+
+Exemples:
+  loki-query headscale                  # Tous les logs, dernière heure
+  loki-query headscale 2h errors       # Erreurs, 2 dernières heures
+  loki-query headscale 6h connections   # Événements connexion
+  loki-query headscale 1d register      # Enregistrements nouveaux appareils
+  loki-query headscale 12h auth         # Tentatives d'authentification
+  loki-query traefik 30m errors         # Erreurs Traefik
+  loki-query labels                     # Labels Loki disponibles
+EOF
+    exit 0
+}
+
+# Service → LogQL label selector
+get_selector() {
+    case "$1" in
+        headscale)  echo '{host="headscale",unit="headscale.service"}' ;;
+        traefik)    echo '{host="traefik",unit="traefik.service"}' ;;
+        dns|dns1)   echo '{host="technitium"}' ;;
+        dns2)       echo '{host="technitium2"}' ;;
+        step-ca)    echo '{host="step-ca"}' ;;
+        forgejo)    echo '{host="forgejo",unit="forgejo.service"}' ;;
+        homepage)   echo '{host="homepage"}' ;;
+        vaultwarden) echo '{host="vaultwarden",unit="vaultwarden.service"}' ;;
+        immich)     echo '{host="immich"}' ;;
+        authentik)  echo '{host="authentik"}' ;;
+        jellyfin)   echo '{host="jellyfin",unit="jellyfin.service"}' ;;
+        *)          echo "{host=\"$1\"}" ;;
+    esac
+}
+
+# Service-specific filters
+get_filter() {
+    local service="$1" filter="$2"
+    case "$service:$filter" in
+        headscale:connections)  echo '|= "Node"' ;;
+        headscale:errors)      echo '|~ "WRN|ERR|FTL"' ;;
+        headscale:register)    echo '|~ "register|Register"' ;;
+        headscale:auth)        echo '|~ "authenticate|Authorization|login"' ;;
+        headscale:derp)        echo '|= "DERP"' ;;
+        traefik:errors)        echo '|~ "error|ERR|level.*error|500"' ;;
+        traefik:access)        echo '|= "entryPointName"' ;;
+        traefik:tls)           echo '|~ "tls|TLS|certificate|cert"' ;;
+        *:errors)              echo '|~ "error|ERROR|ERR|FTL|FATAL|CRIT"' ;;
+        *:warn)                echo '|~ "warn|WARN|WRN"' ;;
+        *)                     echo "|= \"$filter\"" ;;
+    esac
+}
+
+# Parse timerange (1h, 30m, 2d) → seconds
+parse_range() {
+    local range="$1"
+    local num="${range%[smhd]}"
+    local unit="${range: -1}"
+    case "$unit" in
+        s) echo "$num" ;;
+        m) echo $((num * 60)) ;;
+        h) echo $((num * 3600)) ;;
+        d) echo $((num * 86400)) ;;
+        *) echo 3600 ;;
+    esac
+}
+
+# Format JSON output lisiblement
+format_output() {
+    python3 -c "
+import json, sys
+from datetime import datetime
+
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    print('ERREUR: réponse Loki invalide (pas du JSON)')
+    sys.exit(1)
+
+if data.get('status') != 'success':
+    print('ERREUR:', data.get('status', 'inconnu'))
+    sys.exit(1)
+
+results = data.get('data', {}).get('result', [])
+if not results:
+    print('Aucun log trouvé pour cette période/filtre.')
+    sys.exit(0)
+
+lines = []
+for stream in results:
+    labels = stream.get('stream', {})
+    for ts, line in stream.get('values', []):
+        dt = datetime.fromtimestamp(int(ts) / 1e9)
+        lines.append((int(ts), f'{dt:%Y-%m-%d %H:%M:%S} | {line.strip()}'))
+
+# Tri chronologique (plus ancien en premier)
+lines.sort(key=lambda x: x[0])
+
+for _, formatted in lines:
+    print(formatted)
+
+print(f'--- {len(lines)} lignes ---')
+"
+}
+
+# --- Main ---
+[[ $# -eq 0 ]] && usage
+
+case "$1" in
+    -h|--help|help)
+        usage
+        ;;
+    labels)
+        curl -s "$LOKI/loki/api/v1/labels" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data', [])
+for l in sorted(data):
+    print(f'  {l}')
+print(f'--- {len(data)} labels ---')
+"
+        exit 0
+        ;;
+    services)
+        echo "Services configurés :"
+        echo "  headscale  — filtres: connections, errors, register, auth, derp"
+        echo "  traefik    — filtres: errors, access, tls"
+        echo "  dns / dns2 — filtres: errors, warn"
+        echo "  step-ca    — filtres: errors, warn"
+        echo "  forgejo    — filtres: errors, warn"
+        echo "  vaultwarden — filtres: errors, warn"
+        echo "  immich     — filtres: errors, warn"
+        echo "  authentik  — filtres: errors, warn"
+        echo "  jellyfin   — filtres: errors, warn"
+        echo "  homepage   — filtres: errors, warn"
+        echo ""
+        echo "Filtre générique : errors, warn, ou texte libre"
+        echo "Tout nom non listé sera tenté avec host=\"<nom>\""
+        exit 0
+        ;;
+esac
+
+SERVICE="$1"
+RANGE="${2:-$DEFAULT_RANGE}"
+FILTER="${3:-}"
+
+# Build LogQL query
+SELECTOR=$(get_selector "$SERVICE")
+if [[ -n "$FILTER" ]]; then
+    FILTER_EXPR=$(get_filter "$SERVICE" "$FILTER")
+    QUERY="$SELECTOR $FILTER_EXPR"
+else
+    QUERY="$SELECTOR"
+fi
+
+# Compute start time (nanoseconds)
+SECONDS_AGO=$(parse_range "$RANGE")
+START="$(( $(date +%s) - SECONDS_AGO ))000000000"
+
+# Execute — --data-urlencode gère l'encodage des accolades !
+curl -sG "$LOKI/loki/api/v1/query_range" \
+    --data-urlencode "query=$QUERY" \
+    --data-urlencode "limit=$LIMIT" \
+    --data-urlencode "start=$START" \
+    --data-urlencode "direction=backward" \
+    | format_output
