@@ -1,6 +1,6 @@
 # homelab-scripts
 
-Collection of shell scripts for homelab monitoring, backup automation, and infrastructure management. Battle-tested on a 35+ CT/VM Proxmox cluster.
+Collection of shell scripts for homelab monitoring, backup automation, and infrastructure management. Battle-tested on a 55+ CT/VM 4-node Proxmox cluster.
 
 ## Scripts
 
