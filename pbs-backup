@@ -1,26 +1,66 @@
 #!/bin/bash
-# pbs-backup — Orchestrate full PBS backup cycle via pve3
-# Deployed on CT 192 (OpenFang) at /usr/local/bin/pbs-backup
+# pbs-backup — Orchestrate a full PBS backup cycle on a Wake-on-LAN node
 #
-# Flow: WOL pve3 → wait boot → enable storage → backup pve1+pve2 → wait → prune → GC → disable → shutdown
-# Exit codes: 0=success, 1=partial (some backups failed), 2=critical (pve3 unreachable)
+# Flow: WOL backup host → wait boot → enable storage → vzdump every node →
+#       wait → prune → GC → disable storage → shutdown
+# Exit codes: 0=success, 1=partial (some backups failed), 2=critical (host unreachable)
 #
 # Usage: pbs-backup [--dry-run]
-# Requires: /opt/openfang/scripts/kv-push.env (PVE1_TOKEN, PVE2_TOKEN)
+#
+# Configuration lives in the environment, never in this file — see
+# examples/homelab-scripts.env.example:
+#
+#   PBS_HOST_MAC, PBS_HOST_IP   the machine woken up and shut down
+#   PBS_IP                      the PBS API endpoint (may be a CT on that host)
+#   PBS_DATASTORE, PBS_PRUNE_JOB
+#   PBS_STORAGE                 the PVE storage entry pointing at PBS
+#   PVE_NODES                   one "name|host|api_token" per line
+#   PVE_STORAGE_NODE            node used to toggle the storage entry (first by default)
+#
+# A maintained, fully generic version of this script lives in its own repo:
+# https://github.com/ferr079/pbs-autobackup
 
 set -uo pipefail
 
-source /opt/openfang/scripts/kv-push.env
+ENV_FILE="${HOMELAB_SCRIPTS_ENV:-$HOME/.config/homelab-scripts/homelab-scripts.env}"
+if [ -r "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  set -a; . "$ENV_FILE"; set +a
+fi
 
-PVE3_MAC="00:25:22:eb:cc:44"
-PVE3_IP="192.168.1.253"
-PBS_IP="192.168.1.150"
-PBS_STORAGE="pbs-pve3"
-BACKUP_MODE="snapshot"
-COMPRESS="zstd"
-MAX_BOOT_WAIT=180   # seconds
-MAX_TASK_WAIT=3600  # seconds (1h max for all backups)
+: "${PBS_HOST_MAC:?PBS_HOST_MAC is required}"
+: "${PBS_HOST_IP:?PBS_HOST_IP is required}"
+: "${PBS_IP:?PBS_IP is required}"
+: "${PVE_NODES:?PVE_NODES is required}"
+
+PBS_STORAGE="${PBS_STORAGE:-pbs}"
+PBS_DATASTORE="${PBS_DATASTORE:-}"
+PBS_PRUNE_JOB="${PBS_PRUNE_JOB:-}"
+BACKUP_MODE="${BACKUP_MODE:-snapshot}"
+COMPRESS="${COMPRESS:-zstd}"
+MAX_BOOT_WAIT="${MAX_BOOT_WAIT:-180}"   # seconds
+MAX_TASK_WAIT="${MAX_TASK_WAIT:-3600}"  # seconds (1h max for all backups)
 DRY_RUN=false
+
+# First configured node drives the storage toggle unless told otherwise.
+storage_node_host() {
+  if [ -n "${PVE_STORAGE_NODE:-}" ]; then
+    while IFS='|' read -r name host _token; do
+      [ "$name" = "$PVE_STORAGE_NODE" ] && { echo "$host"; return; }
+    done <<< "$PVE_NODES"
+  fi
+  head -n1 <<< "$PVE_NODES" | cut -d'|' -f2
+}
+storage_node_token() {
+  if [ -n "${PVE_STORAGE_NODE:-}" ]; then
+    while IFS='|' read -r name _host token; do
+      [ "$name" = "$PVE_STORAGE_NODE" ] && { echo "$token"; return; }
+    done <<< "$PVE_NODES"
+  fi
+  head -n1 <<< "$PVE_NODES" | cut -d'|' -f3
+}
+STORAGE_HOST="$(storage_node_host)"
+STORAGE_TOKEN="$(storage_node_token)"
 
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=true
 
@@ -29,9 +69,9 @@ err() { echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2; }
 
 cleanup() {
   log "Cleanup: disabling PBS storage..."
-  pve_api PUT "https://192.168.1.251:8006/api2/json/storage/${PBS_STORAGE}" "$PVE1_TOKEN" "disable=1" > /dev/null 2>&1 || true
-  log "Cleanup: shutting down pve3..."
-  ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${PVE3_IP} "shutdown -h now" 2>/dev/null || true
+  pve_api PUT "https://${STORAGE_HOST}:8006/api2/json/storage/${PBS_STORAGE}" "$STORAGE_TOKEN" "disable=1" > /dev/null 2>&1 || true
+  log "Cleanup: shutting down the backup host..."
+  ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${PBS_HOST_IP} "shutdown -h now" 2>/dev/null || true
   log "Cleanup done."
 }
 
@@ -44,24 +84,24 @@ pve_api() {
   fi
 }
 
-# --- Step 1: Wake pve3 ---
-log "Step 1/7: Waking pve3 (${PVE3_MAC})..."
+# --- Step 1: Wake the backup host ---
+log "Step 1/7: Waking backup host (${PBS_HOST_MAC})..."
 if $DRY_RUN; then
   log "[DRY-RUN] Would send WOL packet"
 else
-  wakeonlan "$PVE3_MAC" > /dev/null 2>&1
+  wakeonlan "$PBS_HOST_MAC" > /dev/null 2>&1
 fi
 
-# --- Step 2: Wait for pve3 to boot ---
-log "Step 2/7: Waiting for pve3 to boot (max ${MAX_BOOT_WAIT}s)..."
+# --- Step 2: Wait for the backup host to boot ---
+log "Step 2/7: Waiting for the backup host to boot (max ${MAX_BOOT_WAIT}s)..."
 if ! $DRY_RUN; then
   elapsed=0
   while [ $elapsed -lt $MAX_BOOT_WAIT ]; do
-    if ping -c 1 -W 2 "$PVE3_IP" > /dev/null 2>&1; then
-      log "pve3 responding to ping after ${elapsed}s"
+    if ping -c 1 -W 2 "$PBS_HOST_IP" > /dev/null 2>&1; then
+      log "backup host responding to ping after ${elapsed}s"
       # Extra wait for PBS service to start
       sleep 10
-      # Verify PBS API is up (CT 150 on pve3, not pve3 host)
+      # Verify the PBS API answers (it may run in a CT on that host)
       if curl -sk --max-time 5 "https://${PBS_IP}:8007/api2/json/version" > /dev/null 2>&1; then
         log "PBS API is up"
         break
@@ -72,7 +112,7 @@ if ! $DRY_RUN; then
   done
 
   if [ $elapsed -ge $MAX_BOOT_WAIT ]; then
-    err "pve3 did not boot within ${MAX_BOOT_WAIT}s"
+    err "backup host did not boot within ${MAX_BOOT_WAIT}s"
     exit 2
   fi
 fi
@@ -80,7 +120,7 @@ fi
 # --- Step 3: Enable PBS storage ---
 log "Step 3/7: Enabling storage ${PBS_STORAGE}..."
 if ! $DRY_RUN; then
-  result=$(pve_api PUT "https://192.168.1.251:8006/api2/json/storage/${PBS_STORAGE}" "$PVE1_TOKEN" "disable=0")
+  result=$(pve_api PUT "https://${STORAGE_HOST}:8006/api2/json/storage/${PBS_STORAGE}" "$STORAGE_TOKEN" "disable=0")
   if ! echo "$result" | python3 -c "import sys,json; json.load(sys.stdin)" > /dev/null 2>&1; then
     err "Failed to enable storage"
     cleanup
@@ -95,8 +135,8 @@ task_ids=()
 backup_ok=0
 backup_fail=0
 
-for node_info in "pve1|192.168.1.251|${PVE1_TOKEN}" "pve2|192.168.1.252|${PVE2_TOKEN}"; do
-  IFS='|' read -r nname nip ntoken <<< "$node_info"
+while IFS='|' read -r nname nip ntoken; do
+  [ -z "${nname:-}" ] && continue
   log "Step 4/7: Starting backup on ${nname}..."
 
   if $DRY_RUN; then
@@ -115,7 +155,7 @@ for node_info in "pve1|192.168.1.251|${PVE1_TOKEN}" "pve2|192.168.1.252|${PVE2_T
 
   log "${nname}: backup started (UPID: ${upid})"
   task_ids+=("${nname}|${nip}|${ntoken}|${upid}")
-done
+done <<< "$PVE_NODES"
 
 # --- Step 5: Wait for all backups to complete ---
 if [ ${#task_ids[@]} -gt 0 ] && ! $DRY_RUN; then
@@ -166,18 +206,18 @@ if [ ${#task_ids[@]} -gt 0 ] && ! $DRY_RUN; then
 fi
 
 # --- Step 6: Prune old snapshots on PBS ---
-log "Step 6/9: Running prune on PBS (keep-weekly=5, keep-last=1)..."
-if ! $DRY_RUN; then
-  prune_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@192.168.1.150 \
-    "proxmox-backup-manager prune-job run weekly-prune" 2>&1) || true
+log "Step 6/9: Running prune on PBS..."
+if ! $DRY_RUN && [ -n "$PBS_PRUNE_JOB" ]; then
+  prune_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"$PBS_IP" \
+    "proxmox-backup-manager prune-job run ${PBS_PRUNE_JOB}" 2>&1) || true
   log "Prune done"
 fi
 
 # --- Step 7: Garbage collection on PBS ---
 log "Step 7/9: Running garbage collection on PBS..."
-if ! $DRY_RUN; then
-  gc_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@192.168.1.150 \
-    "proxmox-backup-manager garbage-collection start pve3-hdd1" 2>&1) || true
+if ! $DRY_RUN && [ -n "$PBS_DATASTORE" ]; then
+  gc_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"$PBS_IP" \
+    "proxmox-backup-manager garbage-collection start ${PBS_DATASTORE}" 2>&1) || true
   # GC can take a few minutes — wait for it
   sleep 30
   log "GC done"
@@ -186,15 +226,15 @@ fi
 # --- Step 8: Disable PBS storage ---
 log "Step 8/9: Disabling storage ${PBS_STORAGE}..."
 if ! $DRY_RUN; then
-  pve_api PUT "https://192.168.1.251:8006/api2/json/storage/${PBS_STORAGE}" "$PVE1_TOKEN" "disable=1" > /dev/null 2>&1
+  pve_api PUT "https://${STORAGE_HOST}:8006/api2/json/storage/${PBS_STORAGE}" "$STORAGE_TOKEN" "disable=1" > /dev/null 2>&1
   log "Storage disabled"
 fi
 
-# --- Step 9: Shutdown pve3 ---
-log "Step 9/9: Shutting down pve3..."
+# --- Step 9: Shut down the backup host ---
+log "Step 9/9: Shutting down the backup host..."
 if ! $DRY_RUN; then
-  ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${PVE3_IP} "shutdown -h now" 2>/dev/null || true
-  log "pve3 shutdown initiated"
+  ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no root@${PBS_HOST_IP} "shutdown -h now" 2>/dev/null || true
+  log "backup host shutdown initiated"
 fi
 
 # --- Summary ---
