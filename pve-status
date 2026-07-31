@@ -15,8 +15,10 @@ set -uo pipefail
 
 PVE_ENV="${PVE_ENV:-$HOME/.config/homelab-scripts/pve.env}"
 if [ -z "${PVE_NODES:-}" ] && [ -r "$PVE_ENV" ]; then
+  set -a
   # shellcheck disable=SC1090
-  set -a; . "$PVE_ENV"; set +a
+  . "$PVE_ENV"
+  set +a
 fi
 
 if [ -z "${PVE_NODES:-}" ]; then
