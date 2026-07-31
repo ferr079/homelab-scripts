@@ -1,0 +1,15 @@
+# homelab-scripts — service list, shared by http-check and cert-check
+# One service per line:  name|url
+#
+#   http-check   checks the status code of every entry
+#   cert-check   checks the TLS expiry of the https:// entries (SNI = hostname)
+#
+# Lines starting with # and blank lines are ignored.
+
+forge|https://forge.example.lab
+sso|https://sso.example.lab
+wiki|https://wiki.example.lab
+media|https://media.example.lab
+metrics|https://metrics.example.lab
+dns|http://10.0.0.10:5380
+logs|http://10.0.0.40:3100/ready
