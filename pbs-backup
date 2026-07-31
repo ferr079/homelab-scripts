@@ -24,8 +24,10 @@ set -uo pipefail
 
 ENV_FILE="${HOMELAB_SCRIPTS_ENV:-$HOME/.config/homelab-scripts/homelab-scripts.env}"
 if [ -r "$ENV_FILE" ]; then
+  set -a
   # shellcheck disable=SC1090
-  set -a; . "$ENV_FILE"; set +a
+  . "$ENV_FILE"
+  set +a
 fi
 
 : "${PBS_HOST_MAC:?PBS_HOST_MAC is required}"
@@ -210,6 +212,7 @@ log "Step 6/9: Running prune on PBS..."
 if ! $DRY_RUN && [ -n "$PBS_PRUNE_JOB" ]; then
   prune_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"$PBS_IP" \
     "proxmox-backup-manager prune-job run ${PBS_PRUNE_JOB}" 2>&1) || true
+  [ -n "$prune_out" ] && log "Prune output: ${prune_out}"
   log "Prune done"
 fi
 
@@ -218,6 +221,7 @@ log "Step 7/9: Running garbage collection on PBS..."
 if ! $DRY_RUN && [ -n "$PBS_DATASTORE" ]; then
   gc_out=$(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"$PBS_IP" \
     "proxmox-backup-manager garbage-collection start ${PBS_DATASTORE}" 2>&1) || true
+  [ -n "$gc_out" ] && log "GC output: ${gc_out}"
   # GC can take a few minutes — wait for it
   sleep 30
   log "GC done"
