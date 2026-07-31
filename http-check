@@ -1,43 +1,28 @@
 #!/bin/bash
 # http-check — Check HTTP status code of services
 # Usage: http-check <service|url> [service2 ...] | http-check all
+#
+# Services are read from a config file (default:
+# ~/.config/homelab-scripts/services.conf), one "name|url" per line:
+#
+#   forgejo|https://forge.example.lab
+#   dns|http://10.0.0.10:5380
+#
+# See examples/services.conf.example.
 
-KNOWN_SERVICES=(
-  authentik vaultwarden forgejo traefik homepage
-  linkwarden drawio excalidraw bytestash
-  kavita immich jellyfin beszel wazuh patchmon
-  headscale technitium wikinfra freshrss the-lounge pentagi homeassistant
-)
+SERVICES_FILE="${SERVICES_FILE:-$HOME/.config/homelab-scripts/services.conf}"
 
-declare -A SERVICE_URLS
-SERVICE_URLS=(
-  [authentik]=https://authentik.home.arpa
-  [vaultwarden]=https://vaultwarden.home.arpa
-  [forgejo]=https://forgejo.home.arpa
-  [traefik]=https://traefik.home.arpa
-  [homepage]=https://homepage.home.arpa
-  [linkwarden]=https://linkwarden.home.arpa
-  [drawio]=https://drawio.home.arpa/draw/
-  [excalidraw]=https://excalidraw.home.arpa
-  [bytestash]=https://bytestash.home.arpa
-  [kavita]=https://kavita.home.arpa
-  [immich]=https://immich.home.arpa
-  [jellyfin]=https://jellyfin.home.arpa
-  [beszel]=https://beszel.home.arpa
-  [wazuh]=https://wazuh.home.arpa
-  [patchmon]=https://patchmon.home.arpa
-  [victoriametrics]=https://victoriametrics.home.arpa
-  [semaphore]=https://semaphore.home.arpa
-  [netbox]=https://netbox.home.arpa
-  [openfang]=http://192.0.2.192:50051
-  [headscale]=http://192.0.2.106:8080
-  [technitium]=http://192.0.2.100:5380
-  [wikinfra]=https://wikinfra.home.arpa
-  [freshrss]=https://freshrss.home.arpa
-  [the-lounge]=https://the-lounge.home.arpa
-  [pentagi]=https://pentagi.home.arpa
-  [homeassistant]=https://homeassistant.home.arpa
-)
+KNOWN_SERVICES=()
+declare -A SERVICE_URLS=()
+if [ -r "$SERVICES_FILE" ]; then
+  while IFS='|' read -r name url; do
+    [ -z "${name:-}" ] && continue
+    [[ "$name" == \#* ]] && continue
+    [ -z "${url:-}" ] && continue
+    KNOWN_SERVICES+=("$name")
+    SERVICE_URLS[$name]="$url"
+  done < "$SERVICES_FILE"
+fi
 
 check_url() {
   local name=$1
@@ -58,7 +43,13 @@ check_url() {
 
 if [ $# -eq 0 ]; then
   echo "Usage: http-check <service|url> [service2 ...] | http-check all"
-  echo "Services: ${KNOWN_SERVICES[*]}"
+  echo "Config:   $SERVICES_FILE"
+  echo "Services: ${KNOWN_SERVICES[*]:-none configured}"
+  exit 1
+fi
+
+if [ "$1" = "all" ] && [ ${#KNOWN_SERVICES[@]} -eq 0 ]; then
+  echo "http-check: no service found in $SERVICES_FILE" >&2
   exit 1
 fi
 

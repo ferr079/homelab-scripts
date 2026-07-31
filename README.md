@@ -48,7 +48,23 @@ Collection of shell scripts for homelab monitoring, backup automation, and infra
 
 ## Configuration
 
-Each script uses environment variables or inline configuration arrays. Edit the `SERVICES`, `SERVICE_URLS`, or API endpoints at the top of each script to match your infrastructure.
+Nothing is hardcoded in the scripts — hosts, URLs and tokens all come from two files under `~/.config/homelab-scripts/`:
+
+```bash
+mkdir -p ~/.config/homelab-scripts
+cp examples/services.conf.example        ~/.config/homelab-scripts/services.conf
+cp examples/homelab-scripts.env.example  ~/.config/homelab-scripts/homelab-scripts.env
+chmod 600 ~/.config/homelab-scripts/homelab-scripts.env
+```
+
+| File | Read by | Contents |
+|---|---|---|
+| `services.conf` | `http-check`, `cert-check` | one `name\|url` per line; `cert-check` uses the `https://` ones, hostname as SNI |
+| `homelab-scripts.env` | `pve-status`, `pbs-backup`, `loki-query` | `PVE_NODES`, PBS host/datastore, `LOKI_URL`, thresholds |
+
+Both paths can be overridden: `SERVICES_FILE`, `HOMELAB_SCRIPTS_ENV`, `PVE_ENV`. Every value can also be exported directly in the environment.
+
+**Proxmox tokens belong in that env file and nowhere else.** Give them the smallest role that works: `PVEAuditor` is enough for `pve-status`; `pbs-backup` also needs `VM.Backup` and `Datastore.Allocate`.
 
 ## License
 
