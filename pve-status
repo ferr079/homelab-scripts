@@ -7,13 +7,13 @@
 #   PVE_NODES="pve1|10.0.0.11|PVEAPIToken=monitor@pve!status=<uuid>
 #   pve2|10.0.0.12|PVEAPIToken=monitor@pve!status=<uuid>"
 #
-# Put it in ~/.config/homelab-scripts/pve.env (chmod 600) and source it, or
-# export it from your shell profile. Use a PVEAuditor token: this script only
-# reads.
+# Put it in ~/.config/homelab-scripts/homelab-scripts.env (chmod 600) — the
+# same file the other scripts read — or export it from your shell profile.
+# Use a PVEAuditor token: this script only reads.
 
 set -uo pipefail
 
-PVE_ENV="${PVE_ENV:-$HOME/.config/homelab-scripts/pve.env}"
+PVE_ENV="${PVE_ENV:-${HOMELAB_SCRIPTS_ENV:-$HOME/.config/homelab-scripts/homelab-scripts.env}}"
 if [ -z "${PVE_NODES:-}" ] && [ -r "$PVE_ENV" ]; then
   set -a
   # shellcheck disable=SC1090
