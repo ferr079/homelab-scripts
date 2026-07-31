@@ -1,43 +1,28 @@
 #!/bin/bash
 # http-check — Check HTTP status code of services
 # Usage: http-check <service|url> [service2 ...] | http-check all
+#
+# Services are read from a config file (default:
+# ~/.config/homelab-scripts/services.conf), one "name|url" per line:
+#
+#   forgejo|https://forge.example.lab
+#   dns|http://10.0.0.10:5380
+#
+# See examples/services.conf.example.
 
-KNOWN_SERVICES=(
-  authentik vaultwarden forgejo traefik homepage
-  linkwarden drawio excalidraw bytestash
-  kavita immich jellyfin beszel wazuh patchmon
-  headscale technitium wikinfra freshrss the-lounge pentagi homeassistant
-)
+SERVICES_FILE="${SERVICES_FILE:-$HOME/.config/homelab-scripts/services.conf}"
 
-declare -A SERVICE_URLS
-SERVICE_URLS=(
-  [authentik]=https://authentik.pixelium.internal
-  [vaultwarden]=https://vaultwarden.pixelium.internal
-  [forgejo]=https://forgejo.pixelium.internal
-  [traefik]=https://traefik.pixelium.internal
-  [homepage]=https://homepage.pixelium.internal
-  [linkwarden]=https://linkwarden.pixelium.internal
-  [drawio]=https://drawio.pixelium.internal/draw/
-  [excalidraw]=https://excalidraw.pixelium.internal
-  [bytestash]=https://bytestash.pixelium.internal
-  [kavita]=https://kavita.pixelium.internal
-  [immich]=https://immich.pixelium.internal
-  [jellyfin]=https://jellyfin.pixelium.internal
-  [beszel]=https://beszel.pixelium.internal
-  [wazuh]=https://wazuh.pixelium.internal
-  [patchmon]=https://patchmon.pixelium.internal
-  [victoriametrics]=https://victoriametrics.pixelium.internal
-  [semaphore]=https://semaphore.pixelium.internal
-  [netbox]=https://netbox.pixelium.internal
-  [openfang]=http://192.168.1.192:50051
-  [headscale]=http://192.168.1.106:8080
-  [technitium]=http://192.168.1.100:5380
-  [wikinfra]=https://wikinfra.pixelium.internal
-  [freshrss]=https://freshrss.pixelium.internal
-  [the-lounge]=https://the-lounge.pixelium.internal
-  [pentagi]=https://pentagi.pixelium.internal
-  [homeassistant]=https://homeassistant.pixelium.internal
-)
+KNOWN_SERVICES=()
+declare -A SERVICE_URLS=()
+if [ -r "$SERVICES_FILE" ]; then
+  while IFS='|' read -r name url; do
+    [ -z "${name:-}" ] && continue
+    [[ "$name" == \#* ]] && continue
+    [ -z "${url:-}" ] && continue
+    KNOWN_SERVICES+=("$name")
+    SERVICE_URLS[$name]="$url"
+  done < "$SERVICES_FILE"
+fi
 
 check_url() {
   local name=$1
@@ -58,7 +43,13 @@ check_url() {
 
 if [ $# -eq 0 ]; then
   echo "Usage: http-check <service|url> [service2 ...] | http-check all"
-  echo "Services: ${KNOWN_SERVICES[*]}"
+  echo "Config:   $SERVICES_FILE"
+  echo "Services: ${KNOWN_SERVICES[*]:-none configured}"
+  exit 1
+fi
+
+if [ "$1" = "all" ] && [ ${#KNOWN_SERVICES[@]} -eq 0 ]; then
+  echo "http-check: no service found in $SERVICES_FILE" >&2
   exit 1
 fi
 

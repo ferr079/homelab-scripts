@@ -1,27 +1,65 @@
 #!/bin/bash
 # pve-status — Query Proxmox node/CT status
-# Usage: pve-status <pve1|pve2|all> [node|cts|ct <id>]
+# Usage: pve-status <node|all> [node|cts|ct <id>]
+#
+# Configuration comes from the environment, never from this file:
+#
+#   PVE_NODES="pve1|10.0.0.11|PVEAPIToken=monitor@pve!status=<uuid>
+#   pve2|10.0.0.12|PVEAPIToken=monitor@pve!status=<uuid>"
+#
+# Put it in ~/.config/homelab-scripts/pve.env (chmod 600) and source it, or
+# export it from your shell profile. Use a PVEAuditor token: this script only
+# reads.
 
-PVE1_TOKEN="PVEAPIToken=claude@pve!claude-API=56043bd7-adee-4e1d-ad99-f4e37b5e3b29"
-PVE2_TOKEN="PVEAPIToken=claude@pve!claude-API=2dc09344-ca7b-4d9c-8f69-543f56152234"
+set -uo pipefail
+
+PVE_ENV="${PVE_ENV:-$HOME/.config/homelab-scripts/pve.env}"
+if [ -z "${PVE_NODES:-}" ] && [ -r "$PVE_ENV" ]; then
+  # shellcheck disable=SC1090
+  set -a; . "$PVE_ENV"; set +a
+fi
+
+if [ -z "${PVE_NODES:-}" ]; then
+  echo "pve-status: PVE_NODES is not set (see the header of this script)" >&2
+  exit 1
+fi
+
+node_host() {
+  local want=$1
+  while IFS='|' read -r name host _token; do
+    [ "$name" = "$want" ] && { echo "$host"; return 0; }
+  done <<< "$PVE_NODES"
+  return 1
+}
+
+node_token() {
+  local want=$1
+  while IFS='|' read -r name _host token; do
+    [ "$name" = "$want" ] && { echo "$token"; return 0; }
+  done <<< "$PVE_NODES"
+  return 1
+}
+
+node_names() {
+  while IFS='|' read -r name _host _token; do
+    [ -n "$name" ] && echo "$name"
+  done <<< "$PVE_NODES"
+}
 
 pve_curl() {
   local node=$1
   local path=$2
   local host token
-  case $node in
-    pve1) host="192.168.1.251"; token="$PVE1_TOKEN" ;;
-    pve2) host="192.168.1.252"; token="$PVE2_TOKEN" ;;
-    *) echo "Unknown node: $node"; return 1 ;;
-  esac
+  host=$(node_host "$node") || { echo "Unknown node: $node" >&2; return 1; }
+  token=$(node_token "$node")
   curl -sk -H "Authorization: $token" "https://$host:8006/api2/json$path"
 }
 
 node_status() {
   local node=$1
-  pve_curl "$node" "/nodes/$node/status" | python3 -c "
+  pve_curl "$node" "/nodes/$node/status" | NODE="$node" python3 -c "
 import json, sys, os
-node = '$node'
+node = os.environ['NODE']
 data = json.load(sys.stdin).get('data', {})
 cpu = data.get('cpu', 0) * 100
 mem = data.get('memory', {})
@@ -54,9 +92,9 @@ for ct in cts:
 ct_status() {
   local node=$1
   local ctid=$2
-  pve_curl "$node" "/nodes/$node/lxc/$ctid/status/current" | python3 -c "
-import json, sys
-ctid = '$ctid'
+  pve_curl "$node" "/nodes/$node/lxc/$ctid/status/current" | CTID="$ctid" python3 -c "
+import json, sys, os
+ctid = os.environ['CTID']
 data = json.load(sys.stdin).get('data', {})
 if not data:
     print('CT not found')
@@ -82,24 +120,28 @@ print(f'  Uptime: {days}d {hours}h')
 "
 }
 
-case "$1" in
+case "${1:-}" in
   all)
-    node_status pve1
-    node_status pve2
+    while read -r n; do node_status "$n"; done < <(node_names)
     ;;
-  pve1|pve2)
+  "")
+    echo "Usage: pve-status <node|all> [node|cts|ct <id>]"
+    echo "Nodes: $(node_names | tr '\n' ' ')"
+    echo "Examples:"
+    echo "  pve-status all             # Every configured node"
+    echo "  pve-status pve1 cts        # List CTs on pve1"
+    echo "  pve-status pve2 ct 230     # CT 230 details"
+    ;;
+  *)
+    if ! node_host "$1" > /dev/null; then
+      echo "Unknown node: $1 (configured: $(node_names | tr '\n' ' '))" >&2
+      exit 1
+    fi
     case "${2:-node}" in
       node) node_status "$1" ;;
       cts) list_cts "$1" ;;
-      ct) ct_status "$1" "$3" ;;
-      *) echo "Usage: pve-status <pve1|pve2> [node|cts|ct <id>]" ;;
+      ct) ct_status "$1" "${3:?CT id required}" ;;
+      *) echo "Usage: pve-status <node> [node|cts|ct <id>]" ;;
     esac
-    ;;
-  *)
-    echo "Usage: pve-status <pve1|pve2|all> [node|cts|ct <id>]"
-    echo "Examples:"
-    echo "  pve-status all             # Both nodes"
-    echo "  pve-status pve1 cts        # List CTs on pve1"
-    echo "  pve-status pve2 ct 230     # CT 230 details"
     ;;
 esac

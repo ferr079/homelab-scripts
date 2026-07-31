@@ -1,9 +1,9 @@
 #!/bin/bash
 # loki-query — Interroge Loki pour les services homelab
-# Conçu pour être appelé par OpenFang shell_exec (pas de pipes/accolades exposées)
+# URL de Loki : variable LOKI_URL (défaut http://localhost:3100)
 set -euo pipefail
 
-LOKI="http://192.168.1.240:3100"
+LOKI="${LOKI_URL:-http://localhost:3100}"
 LIMIT=200
 DEFAULT_RANGE="1h"
 

@@ -1,38 +1,42 @@
 #!/bin/bash
 # cert-check — Check TLS certificate expiration for homelab services
-# Deployed on CT 192 (OpenFang) at /usr/local/bin/cert-check
-# Compatible with OpenFang shell_exec constraints (no pipes in invocation)
+#
+# Reads its service list from a config file (default:
+# ~/.config/homelab-scripts/services.conf), one "name|url" per line:
+#
+#   forgejo|https://forge.example.lab
+#   wiki|https://wiki.example.lab
+#
+# Only https:// entries are checked; the hostname is used as SNI.
+# When services share one reverse proxy, point PROXY_HOST at it
+# (e.g. PROXY_HOST=10.0.0.10) so the TLS handshake goes there instead of
+# resolving each name.
+#
+# A standalone, more configurable version of this check lives at
+# https://github.com/ferr079/cert-check
 
 set -euo pipefail
 
 WARN_DAYS="${CERT_WARN_DAYS:-14}"
-TRAEFIK_IP="192.168.1.110"
+PROXY_HOST="${PROXY_HOST:-}"
+SERVICES_FILE="${SERVICES_FILE:-$HOME/.config/homelab-scripts/services.conf}"
 
-# Services with HTTPS via Traefik (SNI on .110:443)
-declare -A SERVICES=(
-  [traefik]="traefik.pixelium.internal"
-  [authentik]="authentik.pixelium.internal"
-  [forgejo]="forgejo.pixelium.internal"
-  [homepage]="homepage.pixelium.internal"
-  [vaultwarden]="vaultwarden.pixelium.internal"
-  [jellyfin]="jellyfin.pixelium.internal"
-  [immich]="immich.pixelium.internal"
-  [kavita]="kavita.pixelium.internal"
-  [freshrss]="freshrss.pixelium.internal"
-  [the-lounge]="the-lounge.pixelium.internal"
-  [linkwarden]="linkwarden.pixelium.internal"
-  [bytestash]="bytestash.pixelium.internal"
-  [drawio]="drawio.pixelium.internal"
-  [excalidraw]="excalidraw.pixelium.internal"
-  [semaphore]="semaphore.pixelium.internal"
-  [netbox]="netbox.pixelium.internal"
-  [beszel]="beszel.pixelium.internal"
-  [wazuh]="wazuh.pixelium.internal"
-  [victoriametrics]="victoriametrics.pixelium.internal"
-  [patchmon]="patchmon.pixelium.internal"
-  [openfang]="openfang.pixelium.internal"
-  [technitium]="technitium.pixelium.internal"
-)
+declare -A SERVICES=()
+if [ -r "$SERVICES_FILE" ]; then
+  while IFS='|' read -r name url; do
+    [ -z "${name:-}" ] && continue
+    [[ "$name" == \#* ]] && continue
+    [[ "$url" != https://* ]] && continue
+    host="${url#https://}"; host="${host%%/*}"; host="${host%%:*}"
+    SERVICES[$name]="$host"
+  done < "$SERVICES_FILE"
+fi
+
+if [ ${#SERVICES[@]} -eq 0 ]; then
+  echo "cert-check: no https service found in $SERVICES_FILE" >&2
+  echo "cert-check: see examples/services.conf.example" >&2
+  exit 1
+fi
 
 check_cert() {
   local name="$1"
@@ -40,7 +44,8 @@ check_cert() {
   local enddate
   local days_left
 
-  enddate=$(echo | openssl s_client -connect "${TRAEFIK_IP}:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2) || true
+  local connect="${PROXY_HOST:-$host}"
+  enddate=$(echo | openssl s_client -connect "${connect}:443" -servername "$host" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2) || true
 
   if [ -z "$enddate" ]; then
     echo "FAIL $name — cannot read certificate"
